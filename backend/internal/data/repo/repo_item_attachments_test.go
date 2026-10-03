@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/sysadminsmedia/homebox/backend/internal/data/ent"
 	"github.com/sysadminsmedia/homebox/backend/internal/data/ent/attachment"
 	"github.com/sysadminsmedia/homebox/backend/internal/sys/config"
+	"gocloud.dev/blob"
 )
 
 func TestMimeTypeForSourceType(t *testing.T) {
@@ -471,4 +473,32 @@ func TestAttachmentRepo_MigrateLegacyFlatPaths_TargetExistsKeepsSource(t *testin
 	dst, err := os.ReadFile(target)
 	require.NoError(t, err)
 	assert.Equal(t, "new", string(dst), "target file should not be overwritten")
+}
+
+// TestAttachmentRepo_FilesystemRootBucket covers the Docker image defaults,
+// where the bucket root is "/" (HBOX_STORAGE_CONN_STRING=file:///?no_tmp_dir=true)
+// and the directory lives in the key prefix. gocloud.dev v0.46.0 rejected every
+// key in that setup as escaping the bucket root.
+func TestAttachmentRepo_FilesystemRootBucket(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("bucket root \"/\" is a Unix path")
+	}
+	ctx := context.Background()
+	root := t.TempDir()
+
+	r := &AttachmentRepo{storage: config.Storage{
+		ConnString: "file:///?no_tmp_dir=true",
+		PrefixPath: strings.TrimPrefix(root, "/"),
+	}}
+	key := r.GetFullPath(r.path(uuid.New(), "hash"))
+
+	bucket, err := blob.OpenBucket(ctx, r.GetConnString())
+	require.NoError(t, err)
+	defer func() { _ = bucket.Close() }()
+
+	require.NoError(t, bucket.WriteAll(ctx, key, []byte("data"), nil))
+	got, err := bucket.ReadAll(ctx, key)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("data"), got)
+	require.NoError(t, bucket.Delete(ctx, key))
 }
